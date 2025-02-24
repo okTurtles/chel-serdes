@@ -1,5 +1,5 @@
 {
-  "name": "serdes",
+  "name": "@chelonia/serdes",
   "version": "1.0.0",
   "description": "",
   "main": "dist/umd/index.cjs",
