@@ -27,6 +27,23 @@ const rawResult = <T extends object> (rawResultSet: WeakSet<T>, obj: T): T => {
   return obj
 }
 
+const portDestructor = (() => {
+  if (typeof FinalizationRegistry !== 'function' || typeof WeakRef !== 'function') {
+    return () => {}
+  }
+  const registry = new FinalizationRegistry((heldValue: () => void) => {
+    heldValue()
+  })
+
+  return (fn: object, port: MessagePort) => {
+    const portWR = new WeakRef(port)
+    registry.register(fn, () => {
+      const port = portWR.deref()
+      port?.close()
+    })
+  }
+})()
+
 type Transferables = MessagePort | ReadableStream | WritableStream | ArrayBuffer | ArrayBufferView
 type Verbatim = Transferables | Blob | File | Error
 type Revokables = MessagePort
@@ -91,10 +108,10 @@ export const serializer = (data: unknown, noFn?: boolean): {
       transferables.add(value)
       return rawResult(rawResultSet, ['_', '_ref', pos])
     }
-    if (ArrayBuffer.isView(value) && !(typeof SharedArrayBuffer !== 'function' || value.buffer instanceof SharedArrayBuffer)) {
+    if (ArrayBuffer.isView(value) && !(typeof SharedArrayBuffer !== 'function' && value.buffer instanceof SharedArrayBuffer)) {
       const pos = verbatim.length
       verbatim[verbatim.length] = value
-      transferables.add(value.buffer)
+      transferables.add(value.buffer as Transferables)
       return rawResult(rawResultSet, ['_', '_ref', pos])
     }
     // Functions aren't supported neither by structuredClone nor JSON. However,
@@ -105,16 +122,13 @@ export const serializer = (data: unknown, noFn?: boolean): {
         try {
           try {
             const result = await value(...deserializer(ev.data[1]) as unknown[])
-            // TODO FIXME: This could still leave some ports open on functions
-            // that return functions that return functions
-            const { data, transferables, revokables: rr } = serializer(result)
+            const { data, transferables } = serializer(result)
             ev.data[0].postMessage([true, data], transferables)
-            rr.forEach(r => revokables.add(r))
           } catch (e) {
-            const { data, transferables, revokables: rr } = serializer(e, true)
+            const { data, transferables } = serializer(e, true)
             ev.data[0].postMessage([false, data], transferables)
-            rr.forEach(r => revokables.add(r))
           }
+          ev.data[0].close()
         } catch (e) {
           console.error('Async error on onmessage handler', e)
         }
@@ -201,24 +215,29 @@ export const deserializer = (data: unknown): unknown => {
         // end back into functions using that port.
         case '_fn': {
           const mp = value[2]
-          return (...args: unknown[]) => {
+          const fn = (...args: unknown[]) => {
             return new Promise((resolve, reject) => {
               const mc = new MessageChannel()
-              // TODO FIXME: Potential memory leak if any of the args is a
-              // function that gets called. This level of nesting isn't
-              // that common. A more comprehensive solution should nevertheless
-              // be devised.
               const { data, transferables } = serializer(args)
-              mc.port1.onmessage = (ev) => {
+              const rcvPort = mc.port1
+              const sendingPort = mc.port2
+              rcvPort.onmessage = (ev) => {
                 if (ev.data[0]) {
                   resolve(deserializer(ev.data[1]))
                 } else {
                   reject(deserializer(ev.data[1]))
                 }
+                rcvPort.close()
               }
-              mp.postMessage([mc.port2, data], [mc.port2, ...transferables])
+              rcvPort.onmessageerror = () => {
+                reject(new Error('Messge error'))
+                rcvPort.close()
+              }
+              mp.postMessage([sendingPort, data], [sendingPort, ...transferables])
             })
           }
+          portDestructor(fn, mp)
+          return fn
         }
       }
     }
