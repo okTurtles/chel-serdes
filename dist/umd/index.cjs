@@ -37,7 +37,9 @@
         return obj;
     };
     // The `serializer` function prepares data before sending it as a message
-    const serializer = (data) => {
+    // The `noFn` boolean disables serializing functions, which helps with
+    // memory management.
+    const serializer = (data, noFn) => {
         const rawResultSet = new WeakSet();
         const verbatim = [];
         const transferables = new Set();
@@ -83,7 +85,7 @@
                 verbatim[verbatim.length] = value;
                 // We need to also serialize `Error.cause` recursively
                 if (value.cause) {
-                    value.cause = (0, exports.serializer)(value.cause).data;
+                    value.cause = (0, exports.serializer)(value.cause, true).data;
                 }
                 return rawResult(rawResultSet, ['_', '_err', rawResult(rawResultSet, ['_', '_ref', pos]), value.name]);
             }
@@ -94,7 +96,7 @@
                 transferables.add(value);
                 return rawResult(rawResultSet, ['_', '_ref', pos]);
             }
-            if (ArrayBuffer.isView(value)) {
+            if (ArrayBuffer.isView(value) && !(typeof SharedArrayBuffer !== 'function' || value.buffer instanceof SharedArrayBuffer)) {
                 const pos = verbatim.length;
                 verbatim[verbatim.length] = value;
                 transferables.add(value.buffer);
@@ -102,18 +104,22 @@
             }
             // Functions aren't supported neither by structuredClone nor JSON. However,
             // we can convert functions into a MessagePort, which is supported
-            if (typeof value === 'function') {
+            if (typeof value === 'function' && !noFn) {
                 const mc = new MessageChannel();
                 mc.port1.onmessage = async (ev) => {
                     try {
                         try {
                             const result = await value(...(0, exports.deserializer)(ev.data[1]));
-                            const { data, transferables } = (0, exports.serializer)(result);
+                            // TODO FIXME: This could still leave some ports open on functions
+                            // that return functions that return functions
+                            const { data, transferables, revokables: rr } = (0, exports.serializer)(result);
                             ev.data[0].postMessage([true, data], transferables);
+                            rr.forEach(r => revokables.add(r));
                         }
                         catch (e) {
-                            const { data, transferables } = (0, exports.serializer)(e);
+                            const { data, transferables, revokables: rr } = (0, exports.serializer)(e, true);
                             ev.data[0].postMessage([false, data], transferables);
+                            rr.forEach(r => revokables.add(r));
                         }
                     }
                     catch (e) {
@@ -205,6 +211,10 @@
                         return (...args) => {
                             return new Promise((resolve, reject) => {
                                 const mc = new MessageChannel();
+                                // TODO FIXME: Potential memory leak if any of the args is a
+                                // function that gets called. This level of nesting isn't
+                                // that common. A more comprehensive solution should nevertheless
+                                // be devised.
                                 const { data, transferables } = (0, exports.serializer)(args);
                                 mc.port1.onmessage = (ev) => {
                                     if (ev.data[0]) {

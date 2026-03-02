@@ -3,7 +3,7 @@ export declare const serdesSerializeSymbol: unique symbol;
 export declare const serdesDeserializeSymbol: unique symbol;
 type Transferables = MessagePort | ReadableStream | WritableStream | ArrayBuffer | ArrayBufferView;
 type Revokables = MessagePort;
-export declare const serializer: (data: unknown) => {
+export declare const serializer: (data: unknown, noFn?: boolean) => {
     data: unknown;
     transferables: Transferables[];
     revokables: Revokables[];

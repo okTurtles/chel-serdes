@@ -32,7 +32,9 @@ type Verbatim = Transferables | Blob | File | Error
 type Revokables = MessagePort
 
 // The `serializer` function prepares data before sending it as a message
-export const serializer = (data: unknown): {
+// The `noFn` boolean disables serializing functions, which helps with
+// memory management.
+export const serializer = (data: unknown, noFn?: boolean): {
     data: unknown,
     transferables: Transferables[],
     revokables: Revokables[]
@@ -78,7 +80,7 @@ export const serializer = (data: unknown): {
       verbatim[verbatim.length] = value
       // We need to also serialize `Error.cause` recursively
       if (value.cause) {
-        value.cause = serializer(value.cause).data
+        value.cause = serializer(value.cause, true).data
       }
       return rawResult(rawResultSet, ['_', '_err', rawResult(rawResultSet, ['_', '_ref', pos]), value.name])
     }
@@ -89,7 +91,7 @@ export const serializer = (data: unknown): {
       transferables.add(value)
       return rawResult(rawResultSet, ['_', '_ref', pos])
     }
-    if (ArrayBuffer.isView(value)) {
+    if (ArrayBuffer.isView(value) && !(typeof SharedArrayBuffer !== 'function' || value.buffer instanceof SharedArrayBuffer)) {
       const pos = verbatim.length
       verbatim[verbatim.length] = value
       transferables.add(value.buffer)
@@ -97,17 +99,21 @@ export const serializer = (data: unknown): {
     }
     // Functions aren't supported neither by structuredClone nor JSON. However,
     // we can convert functions into a MessagePort, which is supported
-    if (typeof value === 'function') {
+    if (typeof value === 'function' && !noFn) {
       const mc = new MessageChannel()
       mc.port1.onmessage = async (ev) => {
         try {
           try {
             const result = await value(...deserializer(ev.data[1]) as unknown[])
-            const { data, transferables } = serializer(result)
+            // TODO FIXME: This could still leave some ports open on functions
+            // that return functions that return functions
+            const { data, transferables, revokables: rr } = serializer(result)
             ev.data[0].postMessage([true, data], transferables)
+            rr.forEach(r => revokables.add(r))
           } catch (e) {
-            const { data, transferables } = serializer(e)
+            const { data, transferables, revokables: rr } = serializer(e, true)
             ev.data[0].postMessage([false, data], transferables)
+            rr.forEach(r => revokables.add(r))
           }
         } catch (e) {
           console.error('Async error on onmessage handler', e)
@@ -198,6 +204,10 @@ export const deserializer = (data: unknown): unknown => {
           return (...args: unknown[]) => {
             return new Promise((resolve, reject) => {
               const mc = new MessageChannel()
+              // TODO FIXME: Potential memory leak if any of the args is a
+              // function that gets called. This level of nesting isn't
+              // that common. A more comprehensive solution should nevertheless
+              // be devised.
               const { data, transferables } = serializer(args)
               mc.port1.onmessage = (ev) => {
                 if (ev.data[0]) {
