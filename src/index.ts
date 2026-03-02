@@ -35,7 +35,10 @@ const portDestructor = (() => {
     heldValue()
   })
 
+  // Automatric destruction (handled on the deserializing end):
+  // When a returned proxy function goes out of scope, close its associated port
   return (fn: object, port: MessagePort) => {
+    // Using a weak reference to prevent leaking memory
     const portWR = new WeakRef(port)
     registry.register(fn, () => {
       const port = portWR.deref()
@@ -116,6 +119,8 @@ export const serializer = (data: unknown, noFn?: boolean): {
     }
     // Functions aren't supported neither by structuredClone nor JSON. However,
     // we can convert functions into a MessagePort, which is supported
+    // To prevent memory leaks, it is important to fetch the `revokables` list
+    // and close ports when they are no longer needed.
     if (typeof value === 'function' && !noFn) {
       const mc = new MessageChannel()
       mc.port1.onmessage = async (ev) => {
@@ -236,6 +241,7 @@ export const deserializer = (data: unknown): unknown => {
               mp.postMessage([sendingPort, data], [sendingPort, ...transferables])
             })
           }
+          // Automatic clean up when the function goes out of scope
           portDestructor(fn, mp)
           return fn
         }
