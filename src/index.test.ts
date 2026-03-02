@@ -8,11 +8,14 @@ describe('Test serdes', () => {
     afterEach(() => {
       // Explicitly call the garbage collector on Node. This makes the tests
       // finish faster (otherwise, they hang until garbage collection occurs)
-      if (typeof global?.gc === 'function') {
-        global.gc()
+      if (typeof gc === 'function') {
+        // eslint-disable-next-line no-undef
+        gc()
       }
     })
-  } catch {}
+  } catch {
+    // if afterEach fails, it's not a critical error
+  }
 
   it('should reconstruct basic object', () => {
     const source = {

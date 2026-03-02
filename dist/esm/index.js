@@ -29,17 +29,12 @@ const portDestructor = (() => {
         return () => { };
     }
     const registry = new FinalizationRegistry((heldValue) => {
-        heldValue();
+        heldValue.close();
     });
     // Automatic destruction (handled on the deserializing end):
     // When a returned proxy function goes out of scope, close its associated port
     return (fn, port) => {
-        // Using a weak reference to prevent leaking memory
-        const portWR = new WeakRef(port);
-        registry.register(fn, () => {
-            const port = portWR.deref();
-            port?.close();
-        });
+        registry.register(fn, port);
     };
 })();
 // The `serializer` function prepares data before sending it as a message
@@ -87,12 +82,26 @@ export const serializer = (data, noFn) => {
         }
         // However, Error cloning doesn't preserve `.name`
         if (value instanceof Error) {
+            const obj = (() => {
+                if (value.cause) {
+                    const causeCopy = value.cause;
+                    try {
+                        // We need to also serialize `Error.cause` recursively
+                        // Do it on a copy so that the original object isn't destructively
+                        // modified
+                        value.cause = serializer(value.cause, true).data;
+                        return structuredClone(value);
+                    }
+                    finally {
+                        value.cause = causeCopy;
+                    }
+                }
+                else {
+                    return value;
+                }
+            })();
             const pos = verbatim.length;
-            verbatim[verbatim.length] = value;
-            // We need to also serialize `Error.cause` recursively
-            if (value.cause) {
-                value.cause = serializer(value.cause, true).data;
-            }
+            verbatim[verbatim.length] = obj;
             return rawResult(rawResultSet, ['_', '_err', rawResult(rawResultSet, ['_', '_ref', pos]), value.name]);
         }
         // Same for other types supported by structuredClone but not JSON
@@ -118,8 +127,14 @@ export const serializer = (data, noFn) => {
                 try {
                     try {
                         const result = await value(...deserializer(ev.data[1]));
-                        const { data, transferables } = serializer(result);
-                        ev.data[0].postMessage([true, data], transferables);
+                        const { data, transferables, revokables } = serializer(result);
+                        try {
+                            ev.data[0].postMessage([true, data], transferables);
+                        }
+                        catch (e) {
+                            revokables.forEach(port => port.close());
+                            throw e;
+                        }
                     }
                     catch (e) {
                         const { data, transferables } = serializer(e, true);
@@ -215,7 +230,7 @@ export const deserializer = (data) => {
                     const fn = (...args) => {
                         return new Promise((resolve, reject) => {
                             const mc = new MessageChannel();
-                            const { data, transferables } = serializer(args);
+                            const { data, transferables, revokables } = serializer(args);
                             const rcvPort = mc.port1;
                             const sendingPort = mc.port2;
                             rcvPort.onmessage = (ev) => {
@@ -236,6 +251,7 @@ export const deserializer = (data) => {
                             }
                             catch (e) {
                                 rcvPort.close();
+                                revokables.forEach(port => port.close());
                                 reject(e);
                             }
                         });
