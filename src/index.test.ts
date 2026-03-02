@@ -3,9 +3,12 @@ import { describe, it, afterEach } from 'node:test'
 import * as _ from './index.js'
 
 describe('Test serdes', () => {
+  // Deno doesn't seem to have implemented `afterEach`
   try {
     afterEach(() => {
-      if (global.gc) {
+      // Explicitly call the garbage collector on Node. This makes the tests
+      // finish faster (otherwise, they hang until garbage collection occurs)
+      if (typeof global?.gc === 'function') {
         global.gc()
       }
     })
@@ -26,8 +29,10 @@ describe('Test serdes', () => {
   it('should not leak memory', async () => {
     // const values = []
     const serialized = _.serializer((callbackFactory: () => Promise<(x: () => string) => Promise<void>>) => {
-      callbackFactory().then(callback => callback(() => 'foo'))
-      return callbackFactory().then(callback => callback(() => 'bar'))
+      return Promise.all([
+        callbackFactory().then(callback => callback(() => 'foo')),
+        callbackFactory().then(callback => callback(() => 'bar'))
+      ])
     })
     const fn = _.deserializer(serialized.data) as (callback: () => (valueProvider: () => Promise<string>) => void) => void
 

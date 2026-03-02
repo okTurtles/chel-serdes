@@ -35,7 +35,7 @@ const portDestructor = (() => {
     heldValue()
   })
 
-  // Automatric destruction (handled on the deserializing end):
+  // Automatic destruction (handled on the deserializing end):
   // When a returned proxy function goes out of scope, close its associated port
   return (fn: object, port: MessagePort) => {
     // Using a weak reference to prevent leaking memory
@@ -111,7 +111,7 @@ export const serializer = (data: unknown, noFn?: boolean): {
       transferables.add(value)
       return rawResult(rawResultSet, ['_', '_ref', pos])
     }
-    if (ArrayBuffer.isView(value) && !(typeof SharedArrayBuffer !== 'function' && value.buffer instanceof SharedArrayBuffer)) {
+    if (ArrayBuffer.isView(value) && !(typeof SharedArrayBuffer === 'function' && value.buffer instanceof SharedArrayBuffer)) {
       const pos = verbatim.length
       verbatim[verbatim.length] = value
       transferables.add(value.buffer as Transferables)
@@ -235,10 +235,15 @@ export const deserializer = (data: unknown): unknown => {
                 rcvPort.close()
               }
               rcvPort.onmessageerror = () => {
-                reject(new Error('Messge error'))
+                reject(new Error('Message error'))
                 rcvPort.close()
               }
-              mp.postMessage([sendingPort, data], [sendingPort, ...transferables])
+              try {
+                mp.postMessage([sendingPort, data], [sendingPort, ...transferables])
+              } catch (e) {
+                rcvPort.close()
+                reject(e)
+              }
             })
           }
           // Automatic clean up when the function goes out of scope

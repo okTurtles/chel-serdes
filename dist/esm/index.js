@@ -24,6 +24,24 @@ const rawResult = (rawResultSet, obj) => {
     rawResultSet.add(obj);
     return obj;
 };
+const portDestructor = (() => {
+    if (typeof FinalizationRegistry !== 'function' || typeof WeakRef !== 'function') {
+        return () => { };
+    }
+    const registry = new FinalizationRegistry((heldValue) => {
+        heldValue();
+    });
+    // Automatic destruction (handled on the deserializing end):
+    // When a returned proxy function goes out of scope, close its associated port
+    return (fn, port) => {
+        // Using a weak reference to prevent leaking memory
+        const portWR = new WeakRef(port);
+        registry.register(fn, () => {
+            const port = portWR.deref();
+            port?.close();
+        });
+    };
+})();
 // The `serializer` function prepares data before sending it as a message
 // The `noFn` boolean disables serializing functions, which helps with
 // memory management.
@@ -84,7 +102,7 @@ export const serializer = (data, noFn) => {
             transferables.add(value);
             return rawResult(rawResultSet, ['_', '_ref', pos]);
         }
-        if (ArrayBuffer.isView(value) && !(typeof SharedArrayBuffer !== 'function' || value.buffer instanceof SharedArrayBuffer)) {
+        if (ArrayBuffer.isView(value) && !(typeof SharedArrayBuffer === 'function' && value.buffer instanceof SharedArrayBuffer)) {
             const pos = verbatim.length;
             verbatim[verbatim.length] = value;
             transferables.add(value.buffer);
@@ -92,23 +110,22 @@ export const serializer = (data, noFn) => {
         }
         // Functions aren't supported neither by structuredClone nor JSON. However,
         // we can convert functions into a MessagePort, which is supported
+        // To prevent memory leaks, it is important to fetch the `revokables` list
+        // and close ports when they are no longer needed.
         if (typeof value === 'function' && !noFn) {
             const mc = new MessageChannel();
             mc.port1.onmessage = async (ev) => {
                 try {
                     try {
                         const result = await value(...deserializer(ev.data[1]));
-                        // TODO FIXME: This could still leave some ports open on functions
-                        // that return functions that return functions
-                        const { data, transferables, revokables: rr } = serializer(result);
+                        const { data, transferables } = serializer(result);
                         ev.data[0].postMessage([true, data], transferables);
-                        rr.forEach(r => revokables.add(r));
                     }
                     catch (e) {
-                        const { data, transferables, revokables: rr } = serializer(e, true);
+                        const { data, transferables } = serializer(e, true);
                         ev.data[0].postMessage([false, data], transferables);
-                        rr.forEach(r => revokables.add(r));
                     }
+                    ev.data[0].close();
                 }
                 catch (e) {
                     console.error('Async error on onmessage handler', e);
@@ -195,25 +212,37 @@ export const deserializer = (data) => {
                 // end back into functions using that port.
                 case '_fn': {
                     const mp = value[2];
-                    return (...args) => {
+                    const fn = (...args) => {
                         return new Promise((resolve, reject) => {
                             const mc = new MessageChannel();
-                            // TODO FIXME: Potential memory leak if any of the args is a
-                            // function that gets called. This level of nesting isn't
-                            // that common. A more comprehensive solution should nevertheless
-                            // be devised.
                             const { data, transferables } = serializer(args);
-                            mc.port1.onmessage = (ev) => {
+                            const rcvPort = mc.port1;
+                            const sendingPort = mc.port2;
+                            rcvPort.onmessage = (ev) => {
                                 if (ev.data[0]) {
                                     resolve(deserializer(ev.data[1]));
                                 }
                                 else {
                                     reject(deserializer(ev.data[1]));
                                 }
+                                rcvPort.close();
                             };
-                            mp.postMessage([mc.port2, data], [mc.port2, ...transferables]);
+                            rcvPort.onmessageerror = () => {
+                                reject(new Error('Message error'));
+                                rcvPort.close();
+                            };
+                            try {
+                                mp.postMessage([sendingPort, data], [sendingPort, ...transferables]);
+                            }
+                            catch (e) {
+                                rcvPort.close();
+                                reject(e);
+                            }
                         });
                     };
+                    // Automatic clean up when the function goes out of scope
+                    portDestructor(fn, mp);
+                    return fn;
                 }
             }
         }
