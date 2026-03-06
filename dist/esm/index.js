@@ -111,10 +111,12 @@ export const serializer = (data, noFn) => {
             transferables.add(value);
             return rawResult(rawResultSet, ['_', '_ref', pos]);
         }
-        if (ArrayBuffer.isView(value) && !(typeof SharedArrayBuffer === 'function' && value.buffer instanceof SharedArrayBuffer)) {
+        if (ArrayBuffer.isView(value)) {
             const pos = verbatim.length;
             verbatim[verbatim.length] = value;
-            transferables.add(value.buffer);
+            if (!(typeof SharedArrayBuffer === 'function' && value.buffer instanceof SharedArrayBuffer)) {
+                transferables.add(value.buffer);
+            }
             return rawResult(rawResultSet, ['_', '_ref', pos]);
         }
         // Functions aren't supported neither by structuredClone nor JSON. However,
@@ -137,8 +139,14 @@ export const serializer = (data, noFn) => {
                         }
                     }
                     catch (e) {
-                        const { data, transferables } = serializer(e, true);
-                        ev.data[0].postMessage([false, data], transferables);
+                        try {
+                            const { data, transferables } = serializer(e, true);
+                            ev.data[0].postMessage([false, data], transferables);
+                        }
+                        catch (e) {
+                            console.error('Error on onmessage handler trying to transmit error', e);
+                            ev.data[0].postMessage([false]);
+                        }
                     }
                     ev.data[0].close();
                 }
@@ -234,17 +242,27 @@ export const deserializer = (data) => {
                             const rcvPort = mc.port1;
                             const sendingPort = mc.port2;
                             rcvPort.onmessage = (ev) => {
-                                if (ev.data[0]) {
-                                    resolve(deserializer(ev.data[1]));
+                                try {
+                                    if (ev.data[0]) {
+                                        resolve(deserializer(ev.data[1]));
+                                    }
+                                    else {
+                                        reject(deserializer(ev.data[1]));
+                                    }
                                 }
-                                else {
-                                    reject(deserializer(ev.data[1]));
+                                finally {
+                                    rcvPort.close();
+                                    revokables.forEach(port => port.close());
                                 }
-                                rcvPort.close();
                             };
                             rcvPort.onmessageerror = () => {
-                                reject(new Error('Message error'));
-                                rcvPort.close();
+                                try {
+                                    reject(new Error('Message error'));
+                                }
+                                finally {
+                                    rcvPort.close();
+                                    revokables.forEach(port => port.close());
+                                }
                             };
                             try {
                                 mp.postMessage([sendingPort, data], [sendingPort, ...transferables]);
