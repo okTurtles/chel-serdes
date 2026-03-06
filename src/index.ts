@@ -164,9 +164,10 @@ export const serializer = (data: unknown, noFn?: boolean): {
               ev.data[0].postMessage([false])
             }
           }
-          ev.data[0].close()
         } catch (e) {
           console.error('Async error on onmessage handler', e)
+        } finally {
+          ev.data[0].close()
         }
       }
       transferables.add(mc.port2)
