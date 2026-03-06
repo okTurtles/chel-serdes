@@ -1,6 +1,6 @@
 {
   "name": "@chelonia/serdes",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "",
   "main": "dist/umd/index.cjs",
   "module": "dist/esm/index.js",
@@ -19,7 +19,7 @@
     }
   },
   "scripts": {
-    "test": "npm run lint && node --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\"));' src/index.test.ts",
+    "test": "npm run lint && node --expose-gc --import 'data:text/javascript,import { register } from \"node:module\"; import { pathToFileURL } from \"node:url\"; register(\"ts-node/esm\", pathToFileURL(\"./\"));' src/index.test.ts",
     "build:esm": "tsc --project tsconfig.json --declaration && mv ./dist/esm/index.d.ts ./dist/esm/index.d.mts",
     "build:umd": "tsc --project tsconfig.umd.json --declaration && mv ./dist/umd/index.js ./dist/umd/index.cjs && mv ./dist/umd/index.d.ts ./dist/umd/index.d.cts",
     "build": "npm run build:esm && npm run build:umd",
