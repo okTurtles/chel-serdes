@@ -112,6 +112,10 @@ export const serializer = (data: unknown, noFn?: boolean): {
           } catch (e) {
             console.error('Error serializing error cause', e)
             serialized?.revokables.forEach(r => r.close())
+
+            // Add a fallback that preserves the error's key details
+            const fallback = new Error(value.message)
+            return fallback
           } finally {
             value.cause = causeCopy
           }
@@ -120,7 +124,7 @@ export const serializer = (data: unknown, noFn?: boolean): {
         }
       })()
       const pos = verbatim.length
-      verbatim[verbatim.length] = obj || Error('Error')
+      verbatim[verbatim.length] = obj
       return rawResult(rawResultSet, ['_', '_err', rawResult(rawResultSet, ['_', '_ref', pos]), value.name])
     }
     // Same for other types supported by structuredClone but not JSON
