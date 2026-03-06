@@ -28,7 +28,7 @@ const rawResult = <T extends object> (rawResultSet: WeakSet<T>, obj: T): T => {
 }
 
 const portDestructor = (() => {
-  if (typeof FinalizationRegistry !== 'function' || typeof WeakRef !== 'function') {
+  if (typeof FinalizationRegistry !== 'function') {
     return () => {}
   }
   const registry = new FinalizationRegistry((heldValue: MessagePort) => {
@@ -94,12 +94,24 @@ export const serializer = (data: unknown, noFn?: boolean): {
       const obj = (() => {
         if (value.cause) {
           const causeCopy = value.cause
+          let serialized: ReturnType<typeof serializer> | undefined
           try {
             // We need to also serialize `Error.cause` recursively
             // Do it on a copy so that the original object isn't destructively
             // modified
-            value.cause = serializer(value.cause, true).data
-            return structuredClone(value)
+            // structuredClone will fail if `cause` has something that it doesn't
+            // support
+            serialized = serializer(value.cause, true)
+            value.cause = serialized.data
+            const copy = structuredClone(value)
+
+            serialized.transferables.forEach(t => transferables.add(t))
+            serialized.revokables.forEach(r => revokables.add(r))
+
+            return copy
+          } catch (e) {
+            console.error('Error serializing error cause', e)
+            serialized?.revokables.forEach(r => r.close())
           } finally {
             value.cause = causeCopy
           }
@@ -108,7 +120,7 @@ export const serializer = (data: unknown, noFn?: boolean): {
         }
       })()
       const pos = verbatim.length
-      verbatim[verbatim.length] = obj
+      verbatim[verbatim.length] = obj || Error('Error')
       return rawResult(rawResultSet, ['_', '_err', rawResult(rawResultSet, ['_', '_ref', pos]), value.name])
     }
     // Same for other types supported by structuredClone but not JSON
@@ -250,8 +262,10 @@ export const deserializer = (data: unknown): unknown => {
                   if (ev.data[0]) {
                     resolve(deserializer(ev.data[1]))
                   } else {
-                    reject(deserializer(ev.data[1]))
+                    reject(ev.data.length > 1 ? deserializer(ev.data[1]) : new Error('Message error'))
                   }
+                } catch (e) {
+                  reject(e)
                 } finally {
                   rcvPort.close()
                   revokables.forEach(port => port.close())
