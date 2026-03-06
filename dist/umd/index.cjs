@@ -59,147 +59,159 @@
         const revokables = new Set();
         // JSON.parse and JSON.stringify are called for their ability to do a deep
         // clone and calling a reviver / replacer.
-        const result = JSON.parse(JSON.stringify(data, (_key, value) => {
-            // Return already processed values without modifications
-            if (value && typeof value === 'object' && rawResultSet.has(value))
-                return value;
-            // Encode undefined as ['_', '_']
-            if (value === undefined)
-                return rawResult(rawResultSet, ['_', '_']);
-            // Encode falsy values as they are (JSON.stringify can handle these well,
-            // except undefined, which can't be represented in JSON)
-            if (!value)
-                return value;
-            // Arrays starting with '_' hold special (internal) meaning. If we receive
-            // such a value to encode, we prepend '_', '_' to ensure they are properly
-            // handled (this will be undone when deserializing)
-            if (Array.isArray(value) && value[0] === '_')
-                return rawResult(rawResultSet, ['_', '_', ...value]);
-            // If something is a Map, encode it as such. It needs to be broken down into
-            // an array so that elements they contain can also be processed, since JSON
-            // does not support Map
-            if (value instanceof Map) {
-                return rawResult(rawResultSet, ['_', 'Map', Array.from(value.entries())]);
-            }
-            // Same for Sets
-            if (value instanceof Set) {
-                return rawResult(rawResultSet, ['_', 'Set', Array.from(value.values())]);
-            }
-            // Error, Blob, File, etc. are supported by structuredClone but not by JSON
-            // We mark these as 'refs', so that the reviver can undo this transformation
-            if (value instanceof Blob || value instanceof File) {
-                const pos = verbatim.length;
-                verbatim[verbatim.length] = value;
-                return rawResult(rawResultSet, ['_', '_ref', pos]);
-            }
-            // However, Error cloning doesn't preserve `.name`
-            if (value instanceof Error) {
-                const obj = (() => {
-                    if (value.cause) {
-                        const causeCopy = value.cause;
-                        let serialized;
+        try {
+            const result = JSON.parse(JSON.stringify(data, (_key, value) => {
+                // Return already processed values without modifications
+                if (value && typeof value === 'object' && rawResultSet.has(value))
+                    return value;
+                // Encode undefined as ['_', '_']
+                if (value === undefined)
+                    return rawResult(rawResultSet, ['_', '_']);
+                // Encode falsy values as they are (JSON.stringify can handle these well,
+                // except undefined, which can't be represented in JSON)
+                if (!value)
+                    return value;
+                // Arrays starting with '_' hold special (internal) meaning. If we receive
+                // such a value to encode, we prepend '_', '_' to ensure they are properly
+                // handled (this will be undone when deserializing)
+                if (Array.isArray(value) && value[0] === '_')
+                    return rawResult(rawResultSet, ['_', '_', ...value]);
+                // If something is a Map, encode it as such. It needs to be broken down into
+                // an array so that elements they contain can also be processed, since JSON
+                // does not support Map
+                if (value instanceof Map) {
+                    return rawResult(rawResultSet, ['_', 'Map', Array.from(value.entries())]);
+                }
+                // Same for Sets
+                if (value instanceof Set) {
+                    return rawResult(rawResultSet, ['_', 'Set', Array.from(value.values())]);
+                }
+                // Error, Blob, File, etc. are supported by structuredClone but not by JSON
+                // We mark these as 'refs', so that the reviver can undo this transformation
+                if (value instanceof Blob || value instanceof File) {
+                    const pos = verbatim.length;
+                    verbatim[verbatim.length] = value;
+                    return rawResult(rawResultSet, ['_', '_ref', pos]);
+                }
+                // However, Error cloning doesn't preserve `.name`
+                if (value instanceof Error) {
+                    const obj = (() => {
+                        if (value.cause) {
+                            const causeCopy = value.cause;
+                            let serialized;
+                            try {
+                                // We need to also serialize `Error.cause` recursively
+                                // Do it on a copy so that the original object isn't destructively
+                                // modified
+                                // structuredClone will fail if `cause` has something that it doesn't
+                                // support
+                                serialized = (0, exports.serializer)(value.cause, true);
+                                value.cause = serialized.data;
+                                const copy = structuredClone(value);
+                                serialized.transferables.forEach(t => transferables.add(t));
+                                serialized.revokables.forEach(r => revokables.add(r));
+                                return copy;
+                            }
+                            catch (e) {
+                                console.error('Error serializing error cause', e);
+                                serialized?.revokables.forEach(r => r.close());
+                                // Add a fallback that preserves the error's key details
+                                const fallback = new Error(value.message);
+                                return fallback;
+                            }
+                            finally {
+                                value.cause = causeCopy;
+                            }
+                        }
+                        else {
+                            return value;
+                        }
+                    })();
+                    const pos = verbatim.length;
+                    verbatim[verbatim.length] = obj;
+                    return rawResult(rawResultSet, ['_', '_err', rawResult(rawResultSet, ['_', '_ref', pos]), value.name]);
+                }
+                // Same for other types supported by structuredClone but not JSON
+                if (value instanceof MessagePort || value instanceof ReadableStream || value instanceof WritableStream || value instanceof ArrayBuffer) {
+                    const pos = verbatim.length;
+                    verbatim[verbatim.length] = value;
+                    transferables.add(value);
+                    return rawResult(rawResultSet, ['_', '_ref', pos]);
+                }
+                if (ArrayBuffer.isView(value)) {
+                    const pos = verbatim.length;
+                    verbatim[verbatim.length] = value;
+                    if (!(typeof SharedArrayBuffer === 'function' && value.buffer instanceof SharedArrayBuffer)) {
+                        transferables.add(value.buffer);
+                    }
+                    return rawResult(rawResultSet, ['_', '_ref', pos]);
+                }
+                // Functions aren't supported neither by structuredClone nor JSON. However,
+                // we can convert functions into a MessagePort, which is supported
+                // To prevent memory leaks, it is important to fetch the `revokables` list
+                // and close ports when they are no longer needed.
+                if (typeof value === 'function' && !noFn) {
+                    const mc = new MessageChannel();
+                    mc.port1.onmessage = async (ev) => {
                         try {
-                            // We need to also serialize `Error.cause` recursively
-                            // Do it on a copy so that the original object isn't destructively
-                            // modified
-                            // structuredClone will fail if `cause` has something that it doesn't
-                            // support
-                            serialized = (0, exports.serializer)(value.cause, true);
-                            value.cause = serialized.data;
-                            const copy = structuredClone(value);
-                            serialized.transferables.forEach(t => transferables.add(t));
-                            serialized.revokables.forEach(r => revokables.add(r));
-                            return copy;
+                            try {
+                                const result = await value(...(0, exports.deserializer)(ev.data[1]));
+                                const { data, transferables, revokables } = (0, exports.serializer)(result);
+                                try {
+                                    ev.data[0].postMessage([true, data], transferables);
+                                }
+                                catch (e) {
+                                    revokables.forEach(port => port.close());
+                                    throw e;
+                                }
+                            }
+                            catch (e) {
+                                try {
+                                    const { data, transferables } = (0, exports.serializer)(e, true);
+                                    ev.data[0].postMessage([false, data], transferables);
+                                }
+                                catch (e) {
+                                    console.error('Error on onmessage handler trying to transmit error', e);
+                                    ev.data[0].postMessage([false]);
+                                }
+                            }
                         }
                         catch (e) {
-                            console.error('Error serializing error cause', e);
-                            serialized?.revokables.forEach(r => r.close());
+                            console.error('Async error on onmessage handler', e);
                         }
                         finally {
-                            value.cause = causeCopy;
+                            ev.data[0].close();
                         }
-                    }
-                    else {
-                        return value;
-                    }
-                })();
-                const pos = verbatim.length;
-                verbatim[verbatim.length] = obj || Error('Error');
-                return rawResult(rawResultSet, ['_', '_err', rawResult(rawResultSet, ['_', '_ref', pos]), value.name]);
-            }
-            // Same for other types supported by structuredClone but not JSON
-            if (value instanceof MessagePort || value instanceof ReadableStream || value instanceof WritableStream || value instanceof ArrayBuffer) {
-                const pos = verbatim.length;
-                verbatim[verbatim.length] = value;
-                transferables.add(value);
-                return rawResult(rawResultSet, ['_', '_ref', pos]);
-            }
-            if (ArrayBuffer.isView(value)) {
-                const pos = verbatim.length;
-                verbatim[verbatim.length] = value;
-                if (!(typeof SharedArrayBuffer === 'function' && value.buffer instanceof SharedArrayBuffer)) {
-                    transferables.add(value.buffer);
+                    };
+                    transferables.add(mc.port2);
+                    revokables.add(mc.port1);
+                    return rawResult(rawResultSet, ['_', '_fn', mc.port2]);
                 }
-                return rawResult(rawResultSet, ['_', '_ref', pos]);
-            }
-            // Functions aren't supported neither by structuredClone nor JSON. However,
-            // we can convert functions into a MessagePort, which is supported
-            // To prevent memory leaks, it is important to fetch the `revokables` list
-            // and close ports when they are no longer needed.
-            if (typeof value === 'function' && !noFn) {
-                const mc = new MessageChannel();
-                mc.port1.onmessage = async (ev) => {
-                    try {
-                        try {
-                            const result = await value(...(0, exports.deserializer)(ev.data[1]));
-                            const { data, transferables, revokables } = (0, exports.serializer)(result);
-                            try {
-                                ev.data[0].postMessage([true, data], transferables);
-                            }
-                            catch (e) {
-                                revokables.forEach(port => port.close());
-                                throw e;
-                            }
-                        }
-                        catch (e) {
-                            try {
-                                const { data, transferables } = (0, exports.serializer)(e, true);
-                                ev.data[0].postMessage([false, data], transferables);
-                            }
-                            catch (e) {
-                                console.error('Error on onmessage handler trying to transmit error', e);
-                                ev.data[0].postMessage([false]);
-                            }
-                        }
-                        ev.data[0].close();
-                    }
-                    catch (e) {
-                        console.error('Async error on onmessage handler', e);
-                    }
-                };
-                transferables.add(mc.port2);
-                revokables.add(mc.port1);
-                return rawResult(rawResultSet, ['_', '_fn', mc.port2]);
-            }
-            const proto = Object.getPrototypeOf(value);
-            // This allows encoding custom arbitrary objects (e.g., GIMessage)
-            if (proto?.constructor?.[exports.serdesTagSymbol] && proto.constructor[exports.serdesSerializeSymbol]) {
-                return rawResult(rawResultSet, ['_', '_custom', proto.constructor[exports.serdesTagSymbol], proto.constructor[exports.serdesSerializeSymbol](value)]);
-            }
-            return value;
-        }), (_key, value) => {
-            // Undo _ref transformations so that structuredClone can send the correct
-            // object
-            if (Array.isArray(value) && value[0] === '_' && value[1] === '_ref') {
-                return verbatim[value[2]];
-            }
-            return value;
-        });
-        return {
-            data: result,
-            transferables: Array.from(transferables),
-            revokables: Array.from(revokables)
-        };
+                const proto = Object.getPrototypeOf(value);
+                // This allows encoding custom arbitrary objects (e.g., GIMessage)
+                if (proto?.constructor?.[exports.serdesTagSymbol] && proto.constructor[exports.serdesSerializeSymbol]) {
+                    return rawResult(rawResultSet, ['_', '_custom', proto.constructor[exports.serdesTagSymbol], proto.constructor[exports.serdesSerializeSymbol](value)]);
+                }
+                return value;
+            }), (_key, value) => {
+                // Undo _ref transformations so that structuredClone can send the correct
+                // object
+                if (Array.isArray(value) && value[0] === '_' && value[1] === '_ref') {
+                    return verbatim[value[2]];
+                }
+                return value;
+            });
+            return {
+                data: result,
+                transferables: Array.from(transferables),
+                revokables: Array.from(revokables)
+            };
+        }
+        catch (e) {
+            // Prevent memory leaks if stringify aborts cleanly mid-traversal
+            revokables.forEach(port => port.close());
+            throw e;
+        }
     };
     exports.serializer = serializer;
     // Internal lookup table for registered deserializers
